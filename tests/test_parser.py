@@ -349,6 +349,94 @@ class TestParserCaching(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class TestLiteralResultIsolation(unittest.TestCase):
+    # A literal node's value lives on the cached AST, so mutating a result
+    # returned by one query must never leak into a later query using the
+    # same (cache-hit) expression.  These cases cross call isolation with
+    # the various structural forms a literal can appear in.
+    def setUp(self):
+        parser.Parser.purge()
+
+    def _assert_isolated(self, expression, expected, mutate):
+        first = parser.Parser().parse(expression).search({})
+        mutate(first)
+        second = parser.Parser().parse(expression).search({})
+        # The second evaluation is unaffected by the in-place mutation.
+        # ``expected`` is an independent object, never read back from the
+        # parser cache under test.
+        self.assertEqual(second, expected)
+        # Each evaluation hands back an independent result object.
+        self.assertIsNot(first, second)
+
+    def test_top_level_object_literal_is_isolated(self):
+        self._assert_isolated(
+            '`{"a": 1}`', {'a': 1},
+            lambda result: result.update(_mark=True))
+
+    def test_top_level_array_literal_is_isolated(self):
+        self._assert_isolated(
+            '`[1, 2, 3]`', [1, 2, 3],
+            lambda result: result.append('DIRTY'))
+
+    def test_literal_in_multi_select_hash_is_isolated(self):
+        self._assert_isolated(
+            '{x: `[1, 2]`}', {'x': [1, 2]},
+            lambda result: result['x'].append('DIRTY'))
+
+    def test_literal_in_nested_multi_select_hash_is_isolated(self):
+        self._assert_isolated(
+            '{outer: {inner: `{"k": 1}`}}',
+            {'outer': {'inner': {'k': 1}}},
+            lambda result: result['outer']['inner'].update(_mark=True))
+
+    def test_literal_in_multi_select_list_is_isolated(self):
+        def mutate(result):
+            result[0].append('DIRTY')
+            result[1].update(_mark=True)
+        self._assert_isolated(
+            '[`[1, 2]`, `{"a": 1}`]', [[1, 2], {'a': 1}], mutate)
+
+    def test_nested_literal_inside_literal_is_isolated(self):
+        # A literal whose own JSON payload nests mutable containers.
+        self._assert_isolated(
+            '`{"outer": [{"inner": [1, 2]}]}`',
+            {'outer': [{'inner': [1, 2]}]},
+            lambda result: result['outer'][0]['inner'].append('DIRTY'))
+
+    def test_scalar_literals_remain_stable_across_calls(self):
+        # Immutable scalars cannot be mutated in place; assert value
+        # stability rather than object identity for them.
+        for expression in ("'raw-string'", '`42`', '`true`', '`null`'):
+            first = parser.Parser().parse(expression).search({})
+            second = parser.Parser().parse(expression).search({})
+            self.assertEqual(first, second)
+
+    def test_cached_ast_literal_is_not_mutated(self):
+        expression = '`{"a": [1, 2]}`'
+        p = parser.Parser()
+        result = p.parse(expression).search({})
+        result['a'].append('DIRTY')
+        result.update(_mark=True)
+        # The literal stored on the cached AST itself stays pristine.
+        ast_literal = p.parse(expression).parsed
+        self.assertEqual(ast_literal, ast.literal({'a': [1, 2]}))
+
+    def test_repeated_queries_return_independent_objects(self):
+        expression = '`[1, 2, 3]`'
+        parsed = parser.Parser().parse(expression)
+        first = parsed.search({})
+        second = parsed.search({})
+        self.assertIsNot(first, second)
+        first.append('DIRTY')
+        self.assertEqual(second, [1, 2, 3])
+
+    def test_cache_hit_semantics_preserved(self):
+        # The isolation fix must not regress the parser's cache: the same
+        # expression still resolves to the same cached ParsedResult.
+        p = parser.Parser()
+        self.assertIs(p.parse('`{"a": 1}`'), p.parse('`{"a": 1}`'))
+
+
 class TestParserAddsExpressionAttribute(unittest.TestCase):
     def test_expression_available_from_parser(self):
         p = parser.Parser()

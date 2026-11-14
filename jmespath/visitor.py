@@ -1,3 +1,4 @@
+import copy
 import operator
 
 from jmespath import functions
@@ -225,7 +226,15 @@ class TreeInterpreter(Visitor):
         return self.visit(node['children'][0], value)
 
     def visit_literal(self, node, value):
-        return node['value']
+        # The literal value is stored on the parsed AST, which is shared
+        # across every evaluation of the same expression (the parser
+        # caches parsed results in Parser._CACHE).  Returning the value
+        # directly would let callers mutate the cached AST in place, so
+        # that a modification to one query's result leaks into all
+        # subsequent queries of the same expression.  A deep copy gives
+        # each evaluation its own independent object, including literals
+        # nested inside multi-select hashes/lists.
+        return copy.deepcopy(node['value'])
 
     def visit_multi_select_dict(self, node, value):
         if value is None:

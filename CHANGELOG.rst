@@ -1,7 +1,10 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Return a deep copy of JSON/string literal values from the interpreter so
+  that in-place mutation of a query result can no longer leak into the
+  parser's cached AST and pollute subsequent queries of the same
+  expression, including literals nested inside multi-select hashes/lists.
 
 
 1.1.0
